@@ -1,0 +1,210 @@
+#!/bin/bash
+#
+# scan — scan documents with the Canon imageCLASS MF4010 (USB)
+#
+# The scanner is driven by SANE's "pixma" backend (Homebrew sane-backends).
+# Canon never released a 64-bit / Apple Silicon ScanGear driver for the
+# MF4010, so macOS Image Capture and Preview cannot see this scanner.
+#
+# Defaults: A4 flatbed, 300 dpi, grayscale, PDF, saved to ~/Documents/Scans
+#
+set -euo pipefail
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+
+OUTDIR="${SCAN_DIR:-$HOME/Documents/Scans}"
+MODE="Gray"
+RES=300
+FORMAT="pdf"
+OPEN_AFTER=1
+PAGES=1
+NAME=""
+OUT=""
+DEVICE=""
+VERSION="0.1.0"
+
+usage() {
+  cat <<'EOF'
+Usage: scan [options]
+
+Scan a page on the Canon MF4010 flatbed and save it as PDF (default),
+PNG, JPEG or TIFF.
+
+Options:
+  -c, --color          Color scan          (default: grayscale)
+  -g, --gray           Grayscale scan
+  -l, --lineart        Black & white text
+  -r, --resolution DPI 75 | 150 | 300 | 600   (default: 300)
+  -p, --pages N        Scan N pages, prompting for each new page
+  -o, --output FILE    Exact output path (extension picks the format)
+  -n, --name NAME      File name base, e.g. "Invoice"
+      --png|--jpg|--tiff   Output format (default: pdf)
+      --no-open        Do not open the result after scanning
+  -d, --device NAME    Override auto-detected SANE device
+      --list           List detected scanners and exit
+      --version        Show version and exit
+  -h, --help           Show this help
+
+Environment:
+  SCAN_DIR             Output folder (default: ~/Documents/Scans)
+
+Examples:
+  scan                            # one page, 300 dpi grayscale PDF
+  scan -c -r 150                  # quick color PDF
+  scan -l -n "Receipt"            # B&W, named file
+  scan -p 3                       # three pages, one PDF per page
+  scan --png -o ~/Desktop/page.png
+
+Notes:
+  * Put the page face-down on the glass, aligned to the top-left corner.
+  * The MF4010 has no document feeder; multi-page mode asks you to swap pages.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -c|--color)    MODE="Color"; shift ;;
+    -g|--gray)     MODE="Gray"; shift ;;
+    -l|--lineart)  MODE="Lineart"; shift ;;
+    -r|--resolution) RES="${2:?missing DPI}"; shift 2 ;;
+    -p|--pages)    PAGES="${2:?missing page count}"; shift 2 ;;
+    -o|--output)   OUT="${2:?missing file path}"; shift 2 ;;
+    -n|--name)     NAME="${2:?missing name}"; shift 2 ;;
+    -d|--device)   DEVICE="${2:?missing device}"; shift 2 ;;
+    --png)         FORMAT="png"; shift ;;
+    --jpg|--jpeg)  FORMAT="jpeg"; shift ;;
+    --tiff)        FORMAT="tiff"; shift ;;
+    --no-open)     OPEN_AFTER=0; shift ;;
+    --list)
+      echo "Detected scanners:"
+      scanimage -f '  %d  (%v %m)' 2>/dev/null || true
+      exit 0 ;;
+    -h|--help)     usage; exit 0 ;;
+    --version)     echo "scan $VERSION"; exit 0 ;;
+    *) echo "scan: unknown option '$1'" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+case "$RES" in
+  75|150|300|600) ;;
+  *) echo "scan: resolution must be 75, 150, 300 or 600 dpi (got '$RES')" >&2; exit 2 ;;
+esac
+
+case "$PAGES" in
+  ''|*[!0-9]*) echo "scan: page count must be a positive number" >&2; exit 2 ;;
+  0) echo "scan: page count must be at least 1" >&2; exit 2 ;;
+esac
+
+if [ -z "$DEVICE" ]; then
+  DEVICE="$(scanimage -f '%d' 2>/dev/null | grep '^pixma:' | head -n 1 || true)"
+fi
+
+if [ -z "$DEVICE" ]; then
+  cat >&2 <<'EOF'
+scan: no Canon scanner found.
+
+  * Check the printer is switched on and the USB cable is seated.
+  * Wake the printer by pressing a button, then try again.
+  * Run:  scan --list
+EOF
+  exit 1
+fi
+
+# Output path handling -------------------------------------------------------
+if [ -n "$OUT" ]; then
+  case "$OUT" in
+    /*) ;;
+    *) OUT="$PWD/$OUT" ;;
+  esac
+  mkdir -p "$(dirname "$OUT")"
+  if [ -z "${OUT##*.}" ] || [ "${OUT##*.}" = "$OUT" ]; then
+    OUT="$OUT.$FORMAT"
+  fi
+  BASE="$OUT"
+else
+  mkdir -p "$OUTDIR"
+  [ -n "$NAME" ] || NAME="Scan-$(date +%Y-%m-%d-%H%M%S)"
+  BASE="$OUTDIR/$NAME.$FORMAT"
+fi
+
+open_file() {
+  [ "$OPEN_AFTER" -eq 1 ] && open "$1" >/dev/null 2>&1 || true
+}
+
+# Scanning -------------------------------------------------------------------
+page=1
+saved=()
+while [ "$page" -le "$PAGES" ]; do
+  if [ "$PAGES" -gt 1 ]; then
+    stem="${BASE%.*}"
+    ext="${BASE##*.}"
+    target="${stem}-p${page}.${ext}"
+  else
+    target="$BASE"
+  fi
+
+  echo "Scanning page ${page}/${PAGES} — $MODE, ${RES} dpi, ${FORMAT} ..." >&2
+
+  # scanimage's own --format=pdf writes a PDF with a broken cross-reference
+  # table (startxref 0), which makes Preview/Quick Look render a blank page.
+  # So scan lossless PNG and let macOS's ImageIO (sips) build the PDF.
+  scan_tmp_dir=""
+  if [ "$FORMAT" = "pdf" ]; then
+    scan_tmp_dir="$(mktemp -d -t scan)"
+    scan_source="$scan_tmp_dir/page.png"
+    scan_format="png"
+  else
+    scan_source="$target"
+    scan_format="$FORMAT"
+  fi
+
+  ok=0
+  if scanimage -d "$DEVICE" --format="$scan_format" --resolution="$RES" \
+        --mode="$MODE" --source Flatbed -o "$scan_source" 2>/tmp/scan_last_error.log; then
+    if [ "$FORMAT" = "pdf" ]; then
+      if sips -s format pdf "$scan_source" --out "$target" >>/tmp/scan_last_error.log 2>&1; then
+        ok=1
+      fi
+    else
+      ok=1
+    fi
+  fi
+
+  if [ -n "$scan_tmp_dir" ]; then
+    rm -rf "$scan_tmp_dir"
+  fi
+
+  if [ "$ok" -ne 1 ]; then
+    echo "scan: the scanner did not complete this page." >&2
+    sed 's/^/  /' /tmp/scan_last_error.log >&2
+    cat >&2 <<'EOF'
+
+Hints:
+  * Press a button on the printer to wake it, then retry.
+  * Unplug/replug the USB cable if the device stopped responding.
+  * If the printer has been idle a long time, wait ~10 s after waking.
+EOF
+    [ "${#saved[@]}" -gt 0 ] && echo "Already saved: ${saved[*]}" >&2
+    exit 1
+  fi
+
+  saved+=("$target")
+  echo "Saved: $target" >&2
+
+  if [ "$page" -lt "$PAGES" ]; then
+    echo >&2
+    printf 'Place page %d on the glass, then press Enter (Ctrl-C to stop) ... ' "$((page + 1))" >&2
+    read -r _
+  fi
+  page=$((page + 1))
+done
+
+for f in "${saved[@]}"; do
+  open_file "$f"
+done
+
+if [ "$PAGES" -eq 1 ]; then
+  echo "$BASE"
+else
+  printf '%s\n' "${saved[@]}"
+fi
