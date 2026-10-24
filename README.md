@@ -74,6 +74,9 @@ Add the Spotlight app afterwards:
 cp -R "$(brew --prefix)/opt/canon-mf4010/Scan.app" /Applications/
 ```
 
+If Homebrew refuses to load the formula from the tap ("untrusted tap"), run
+`brew trust zvdenis/tap` once. Newer Homebrew versions trust taps on install.
+
 ### One-liner (CLI + app)
 
 ```sh

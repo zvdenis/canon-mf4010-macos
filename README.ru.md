@@ -67,6 +67,9 @@ brew install zvdenis/tap/canon-mf4010
 cp -R "$(brew --prefix)/opt/canon-mf4010/Scan.app" /Applications/
 ```
 
+Если Homebrew откажется загружать формулу из стороннего тапа («untrusted
+tap»), один раз выполните `brew trust zvdenis/tap`.
+
 ### Одной командой (CLI + приложение)
 
 ```sh
